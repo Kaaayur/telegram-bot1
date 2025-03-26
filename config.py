@@ -13,5 +13,3 @@ ANIMATOR_IDS = {
 
 KEYWORDS = ["в пути", "на месте", "закончил"]
 
-#  Для PythonAnywhere:
-PA_USERNAME = os.environ['PA_USERNAME']  #  Ваше имя пользователя на PythonAnywhere
