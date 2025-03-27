@@ -1,14 +1,14 @@
 import os
 import logging
-import json  # <-- Импорт для работы с JSON
-from typing import List, Dict, Optional
-from flask import Flask, request, abort
+import json # <-- ДОБАВИТЬ!
+from typing import List, Dict, Optional # <-- ДОБАВИТЬ Optional!
+from flask import Flask, request, abort # <-- ДОБАВИТЬ abort!
 from telegram import Update, Bot
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes # <-- ДОБАВИТЬ ContextTypes!
 from dotenv import load_dotenv
 import sqlite3
 from datetime import datetime
-import asyncio
+import asyncio # <-- ДОБАВИТЬ!
 
 # Предполагаем, что у вас есть эти файлы
 try:
@@ -18,7 +18,7 @@ except ImportError:
     # Заглушки, если файлы не найдены (для базовой работы)
     class Config:
         BOT_TOKEN = "YOUR_BOT_TOKEN" # Замените, если не используете .env
-        WEBHOOK_URL = "YOUR_WEBHOOK_URL" # Замените
+        # WEBHOOK_URL больше не нужен здесь, если Render устанавливает сам
         GOOGLE_SHEETS_CREDENTIALS_JSON = "{}" # JSON строка по умолчанию
         GOOGLE_SHEETS_SPREADSHEET_NAME = "Статусы Аниматоров"
         GOOGLE_SHEETS_WORKSHEET_NAME = "Статусы"
@@ -27,7 +27,7 @@ except ImportError:
         def __init__(self, credentials_path=None): pass
         def open_spreadsheet(self, name): return None
         def create_or_get_worksheet(self, spreadsheet, name): return None
-        def add_status_entry(self, worksheet, user_id, username, status): pass
+        def add_status_entry(self, worksheet, user_id, username, status, timestamp): pass # Добавил timestamp
 
 # --- НАСТРОЙКА ---
 CREDENTIALS_FILE_PATH = "credentials.json"  # Имя файла, который мы создадим
@@ -40,6 +40,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- СОЗДАНИЕ ФАЙЛА УЧЕТНЫХ ДАННЫХ GOOGLE ПРИ ЗАПУСКЕ ---
+GOOGLE_CREDS_AVAILABLE = False # Инициализируем как False
 try:
     # Читаем JSON СТРОКУ из переменной окружения
     google_creds_json_str = os.environ.get(
@@ -56,39 +57,37 @@ try:
     with open(CREDENTIALS_FILE_PATH, "w") as f:
         json.dump(creds_dict, f)
     logger.info(f"✅ Файл учетных данных {CREDENTIALS_FILE_PATH} успешно создан.")
-    GOOGLE_CREDS_AVAILABLE = True
+    GOOGLE_CREDS_AVAILABLE = True # Устанавливаем в True, если файл создан
 
 except (ValueError, json.JSONDecodeError, FileNotFoundError, OSError) as e:
     logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА при обработке учетных данных Google: {e}")
-    GOOGLE_CREDS_AVAILABLE = False # Google Sheets не будут работать
+    # GOOGLE_CREDS_AVAILABLE останется False
+
+# --- ОСТАЛЬНОЙ КОД БЕЗ ИЗМЕНЕНИЙ ---
 
 class AnimatorStatusBot:
     def __init__(self):
-        # Загрузка переменных окружения (если есть .env локально)
+        # Загрузка переменных окружения
         load_dotenv()
 
-        # Параметры бота из переменных окружения или Config
-        self.TOKEN = os.getenv('BOT_TOKEN', getattr(Config, 'BOT_TOKEN', None))
-        # WEBHOOK_URL больше не нужен здесь, Render сам его предоставляет
+        # Параметры бота
+        self.TOKEN = os.getenv('BOT_TOKEN', Config.BOT_TOKEN)
+        # WEBHOOK_URL больше не нужен здесь
         self.DATABASE_PATH = 'animator_statuses.db'
-
-        if not self.TOKEN:
-            logger.critical("BOT_TOKEN не найден!")
-            raise ValueError("BOT_TOKEN не найден!")
 
         # Допустимые статусы
         self.VALID_STATUSES = ['в пути', 'на месте', 'закончил']
 
         # Инициализация базы данных и Google Sheets
         self.setup_database()
-        self.setup_google_sheets() # Использует созданный credentials.json
+        self.setup_google_sheets() # Теперь будет использовать созданный credentials.json
 
         # Создание приложения Telegram
         self.telegram_app = self.create_telegram_app()
 
     def setup_database(self):
         """Создание базы данных для хранения статусов"""
-        try:
+        try: # Добавил try..except
             conn = sqlite3.connect(self.DATABASE_PATH)
             cursor = conn.cursor()
             cursor.execute('''
@@ -103,16 +102,17 @@ class AnimatorStatusBot:
             conn.close()
             logger.info("База данных SQLite настроена.")
         except sqlite3.Error as e:
-             logger.error(f"Ошибка настройки SQLite: {e}")
+            logger.error(f"Ошибка настройки SQLite: {e}")
 
     def setup_google_sheets(self):
         """Настройка подключения к Google Sheets"""
         self.status_worksheet = None
-        if GOOGLE_CREDS_AVAILABLE: # Проверяем, создался ли файл
+        if GOOGLE_CREDS_AVAILABLE: # Используем флаг
             try:
                 self.sheets_manager = GoogleSheetsManager(credentials_path=CREDENTIALS_FILE_PATH) # Передаем путь
                 spreadsheet_name = getattr(Config, 'GOOGLE_SHEETS_SPREADSHEET_NAME', 'Статусы Аниматоров')
                 worksheet_name = getattr(Config, 'GOOGLE_SHEETS_WORKSHEET_NAME', 'Статусы')
+
                 spreadsheet = self.sheets_manager.open_spreadsheet(spreadsheet_name)
                 if spreadsheet:
                     self.status_worksheet = self.sheets_manager.create_or_get_worksheet(
@@ -120,9 +120,9 @@ class AnimatorStatusBot:
                         worksheet_name
                     )
                     if self.status_worksheet:
-                        logger.info(f"Подключение к Google Sheets ({spreadsheet_name}/{worksheet_name}) успешно.")
+                         logger.info(f"Подключение к Google Sheets ({spreadsheet_name}/{worksheet_name}) успешно.")
                     else:
-                        logger.warning("Не удалось получить/создать рабочий лист Google Sheets.")
+                         logger.warning("Не удалось получить/создать рабочий лист Google Sheets.")
                 else:
                     logger.warning("Не удалось открыть таблицу Google Sheets.")
             except Exception as e:
@@ -131,13 +131,13 @@ class AnimatorStatusBot:
              logger.warning("Учетные данные Google недоступны, Google Sheets не будут использоваться.")
 
 
-    async def save_status(self, user_id: int, username: str, status: str):
+    async def save_status(self, user_id: int, username: str, status: str): # Добавил async
         """Сохранение статуса в базу данных и Google Sheets"""
         timestamp = datetime.now()
         logger.info(f"Сохранение статуса: User ID={user_id}, Username={username}, Status={status}, Time={timestamp}")
 
         # Сохранение в SQLite
-        try:
+        try: # Добавил try..except
             conn = sqlite3.connect(self.DATABASE_PATH)
             cursor = conn.cursor()
             cursor.execute('''
@@ -148,13 +148,13 @@ class AnimatorStatusBot:
             conn.close()
             logger.debug("Статус сохранен в SQLite.")
         except sqlite3.Error as e:
-            logger.error(f"Ошибка сохранения в SQLite: {e}")
+             logger.error(f"Ошибка сохранения в SQLite: {e}")
 
         # Сохранение в Google Sheets
         if self.status_worksheet:
-            try:
-                # Важно: используйте await, если add_status_entry асинхронный
-                 await self.sheets_manager.add_status_entry( # ИЛИ просто self.sheets_manager.add_status_entry, если синхронный
+            try: # Добавил try..except
+                # Добавляем await, если add_status_entry асинхронный
+                 await self.sheets_manager.add_status_entry( # Или просто без await, если синхронный
                     self.status_worksheet,
                     user_id,
                     username,
@@ -163,12 +163,11 @@ class AnimatorStatusBot:
                 )
                  logger.debug("Статус отправлен в Google Sheets.")
             except Exception as e:
-                logger.error(f"Ошибка сохранения в Google Sheets: {e}")
+                 logger.error(f"Ошибка сохранения в Google Sheets: {e}")
 
-
-    def extract_status(self, text: str) -> Optional[str]:
+    def extract_status(self, text: str) -> Optional[str]: # Изменил возвращаемый тип
         """Извлечение статуса из сообщения"""
-        if not text:
+        if not text: # Добавил проверку на пустой текст
             return None
         for status in self.VALID_STATUSES:
             if status.lower() in text.lower():
@@ -185,16 +184,16 @@ class AnimatorStatusBot:
 
         return application
 
-    async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE): # Добавил типы
         """Обработка команды /start"""
         await update.message.reply_text(
             "Привет! Я бот для отслеживания статусов аниматоров. "
             "Отправь мне статус: 'в пути', 'на месте' или 'закончил'."
         )
 
-    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE): # Добавил типы
         """Обработка входящих сообщений"""
-        if not update.message or not update.message.text:
+        if not update.message or not update.message.text: # Добавил проверку
             logger.warning("Получено сообщение без текста.")
             return
 
@@ -202,49 +201,50 @@ class AnimatorStatusBot:
         text = update.message.text
         logger.info(f"Получено сообщение от {user.id} ({user.username or user.first_name}): {text}")
 
+
         status = self.extract_status(text)
         if status:
-            await self.save_status(user.id, user.username or user.first_name, status)
+            await self.save_status(user.id, user.username or user.first_name, status) # Добавил await
             await update.message.reply_text(f"Статус '{status}' сохранен.")
         else:
-             logger.debug(f"Статус не найден в сообщении: {text}")
-             # Можно добавить ответ пользователю, что статус не распознан
+            logger.debug(f"Статус не найден в сообщении: {text}") # Добавил лог
 
-    async def process_update(self, update_json):
-        """Асинхронная обработка обновления"""
+    async def process_update(self, update_json): # Добавил async
+        """Асинхронная обработка обновления для Flask"""
         update = Update.de_json(update_json, self.telegram_app.bot)
-        await self.telegram_app.process_update(update)
+        await self.telegram_app.process_update(update) # Добавил await
+
 
 # --- Flask App для Render ---
-# Создаем экземпляр бота глобально, чтобы он был доступен для Flask
+# Создаем экземпляр бота глобально
 bot_instance = AnimatorStatusBot()
 flask_app = Flask(__name__)
 
 @flask_app.route(f'/{bot_instance.TOKEN}', methods=['POST'])
-async def webhook():
+async def webhook(): # Добавил async
     """Обработчик webhook"""
     if request.method == "POST":
         try:
             update_json = request.get_json(force=True)
-            await bot_instance.process_update(update_json)
+            await bot_instance.process_update(update_json) # Добавил await
             return 'OK', 200
         except Exception as e:
             logger.error(f"Ошибка обработки вебхука: {e}")
-            # Не прерываем работу сервера из-за ошибки в одном обновлении
-            return 'Error processing update', 500
+            return 'Error processing update', 500 # Не прерываем сервер
     else:
         abort(405) # Method Not Allowed
 
-# --- Точка входа для Render (через Gunicorn или другой WSGI сервер) ---
-# Render будет импортировать 'flask_app' из этого файла
-# Убедитесь, что ваш Procfile или команда запуска на Render указывает на 'bot:flask_app'
 
-# --- Точка входа для локального запуска (для тестирования) ---
-def main_local():
+# --- Точка входа для Render ---
+# Render будет импортировать 'flask_app' из этого файла
+
+# --- Точка входа для локального запуска ---
+def main_local(): # Переименовал для ясности
     """Запускает бота локально через polling (для отладки)"""
     logger.info("Запуск бота локально через polling...")
+    # bot_instance = AnimatorStatusBot() # Экземпляр уже создан глобально
     bot_instance.telegram_app.run_polling()
 
 if __name__ == '__main__':
-    # Если файл запускается напрямую, запускаем локально через polling
+    # Если запускается напрямую, то локально через polling
      main_local()
