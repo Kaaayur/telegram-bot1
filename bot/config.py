@@ -13,6 +13,6 @@ class Config:
     
     # Путь к credentials Google Sheets
     GOOGLE_CREDENTIALS_PATH = os.getenv(
-        'GOOGLE_CREDENTIALS_PATH', 
+        'GOOGLE_SHEETS_CREDENTIALS_JSON', 
         'credentials.json'
     )
