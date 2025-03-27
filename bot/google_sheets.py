@@ -13,7 +13,7 @@ class GoogleSheetsManager:
             # Определение пути к credentials
             if not credentials_path:
                 from bot.config import Config
-                credentials_path = Config.GOOGLE_CREDENTIALS_PATH
+                credentials_path = Config.GOOGLE_SHEETS_CREDENTIALS_JSON
 
             scope = [
                 'https://spreadsheets.google.com/feeds',
