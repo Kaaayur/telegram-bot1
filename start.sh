@@ -1,2 +1,2 @@
 #!/bin/bash
-gunicorn --worker-tmp-dir /dev/shm -w 4 -b 0.0.0.0:$PORT -k uvicorn.workers.UvicornWorker "bot.main:flask_app"
+uvicorn bot.main:flask_app --host 0.0.0.0 --port $PORT --workers 4
