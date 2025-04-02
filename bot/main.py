@@ -110,7 +110,7 @@ class AnimatorStatusBot:
         if GOOGLE_CREDS_AVAILABLE: # Используем флаг
             try:
                 self.sheets_manager = GoogleSheetsManager(credentials_path=CREDENTIALS_FILE_PATH) # Передаем путь
-                spreadsheet_name = getattr(Config, 'GOOGLE_SHEETS_SPREADSHEET_NAME', 'Статусы Аниматоров')
+                spreadsheet_name = getattr(Config, 'GOOGLE_SHEETS_SPREADSHEET_NAME', 'АнимельБот')
                 worksheet_name = getattr(Config, 'GOOGLE_SHEETS_WORKSHEET_NAME', 'Статусы')
 
                 spreadsheet = self.sheets_manager.open_spreadsheet(spreadsheet_name)
