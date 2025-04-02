@@ -20,7 +20,7 @@ except ImportError:
         BOT_TOKEN = "YOUR_BOT_TOKEN" # Замените, если не используете .env
         # WEBHOOK_URL больше не нужен здесь, если Render устанавливает сам
         GOOGLE_SHEETS_CREDENTIALS_JSON = "{}" # JSON строка по умолчанию
-        GOOGLE_SHEETS_SPREADSHEET_NAME = "Статусы Аниматоров"
+        GOOGLE_SHEETS_SPREADSHEET_NAME = "АнимельБот"
         GOOGLE_SHEETS_WORKSHEET_NAME = "Статусы"
 
     class GoogleSheetsManager: # Заглушка
