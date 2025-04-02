@@ -189,6 +189,22 @@ class AnimatorStatusBot:
         # Создание приложения Telegram
         self.telegram_app = self.create_telegram_app()
 
+        # --- ИСПРАВЛЕНИЕ: ЯВНАЯ ИНИЦИАЛИЗАЦИЯ ПРИЛОЖЕНИЯ TELEGRAM ---
+        # Это необходимо перед вызовом process_update при работе с вебхуком,
+        # так как application.run_polling/run_webhook не вызываются.
+        logger.info("Инициализация приложения Telegram (Application.initialize)...")
+        try:
+            # Используем asyncio.run для выполнения async initialize() из sync __init__
+            # Это создаст временный event loop специально для этого вызова.
+            asyncio.run(self.telegram_app.initialize())
+            logger.info("Приложение Telegram успешно инициализировано.")
+        except Exception as e:
+            # Логируем критическую ошибку, если инициализация не удалась
+            logger.critical(f"НЕ УДАЛОСЬ ИНИЦИАЛИЗИРОВАТЬ ПРИЛОЖЕНИЕ TELEGRAM: {e}", exc_info=True)
+            # Приложение не сможет обрабатывать обновления без успешной инициализации.
+            # Вы можете добавить здесь более строгую обработку, например, SystemExit.
+        # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+
     def setup_database(self):
         """Создание/подключение к базе данных SQLite"""
         try:
@@ -294,13 +310,14 @@ class AnimatorStatusBot:
 
     def create_telegram_app(self):
         """Создание и настройка приложения python-telegram-bot"""
+        # Используем токен, прочитанный в __init__
         application = Application.builder().token(self.TOKEN).build()
 
         # Регистрация обработчиков
         application.add_handler(CommandHandler('start', self.start_command))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
 
-        logger.info("Приложение Telegram создано и обработчики зарегистрированы.")
+        logger.info("Экземпляр приложения Telegram создан, обработчики добавлены.")
         return application
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -318,6 +335,7 @@ class AnimatorStatusBot:
 
         user = update.effective_user
         text = update.message.text
+        # Формируем имя пользователя более надежно
         username = user.username or f"{user.first_name} {user.last_name or ''}".strip() or f"ID:{user.id}"
         logger.info(f"Получено сообщение от {user.id} ({username}): {text}")
 
@@ -333,13 +351,27 @@ class AnimatorStatusBot:
     async def process_update(self, update_json: Dict):
         """Обработка входящего обновления от вебхука"""
         logger.debug(f"Обработка JSON обновления: {update_json}")
+        # --- ДОБАВЛЕНА ПРОВЕРКА ИНИЦИАЛИЗАЦИИ ПЕРЕД ОБРАБОТКОЙ ---
+        # Хотя мы инициализировали в __init__, добавим проверку на всякий случай,
+        # если в будущем логика изменится.
+        if not self.telegram_app.initialized:
+            logger.error("Попытка обработать обновление для неинициализированного приложения!")
+            # Не можем обработать, возвращаем ошибку или просто выходим
+            # В данном случае, __init__ должен был упасть, если инициализация не удалась,
+            # но проверка не повредит.
+            # Можно бросить исключение, чтобы Flask вернул 500
+            raise RuntimeError("Telegram Application is not initialized, cannot process update.")
+            # Или просто:
+            # return
+
         update = Update.de_json(update_json, self.telegram_app.bot)
         await self.telegram_app.process_update(update)
+        logger.debug("Обновление успешно передано в telegram_app.process_update")
 
 
 # --- ЭКЗЕМПЛЯРЫ И ПРИЛОЖЕНИЯ ---
 # Создаем экземпляр бота глобально (выполнится в каждом воркере)
-# Все инициализации (DB, Sheets) происходят внутри __init__
+# Все инициализации (DB, Sheets, Telegram App Initialize) происходят внутри __init__
 logger.info("Создание глобального экземпляра AnimatorStatusBot...")
 bot_instance = AnimatorStatusBot()
 logger.info("Глобальный экземпляр AnimatorStatusBot создан.")
@@ -357,6 +389,8 @@ logger.info("ASGI обертка создана.")
 
 # --- МАРШРУТЫ FLASK (Остаются привязанными к flask_app) ---
 # Uvicorn через asgi_app будет передавать запросы сюда
+
+# ИСПРАВЛЕНО: Маршрут изменен на '/webhook'
 @flask_app.route('/webhook', methods=['POST'])
 async def webhook():
     """Обработчик вебхука Telegram"""
@@ -367,16 +401,23 @@ async def webhook():
             if not update_json:
                  logger.warning("Получен пустой JSON в вебхуке.")
                  return 'Bad Request: Empty JSON', 400
-            # Используем метод уже созданного глобального экземпляра bot_instance
+
+            # Используем метод уже созданного и инициализированного глобального экземпляра bot_instance
             await bot_instance.process_update(update_json)
+            logger.info("Вебхук успешно обработан.") # Добавим лог успеха
             return 'OK', 200
         except json.JSONDecodeError as json_err:
              logger.error(f"Ошибка декодирования JSON в вебхуке: {json_err}")
              return 'Bad Request: Invalid JSON', 400
+        except RuntimeError as rt_err:
+             # Ловим ошибку, если process_update вызван для неиниц. приложения
+             # (хотя __init__ должен был упасть раньше)
+             logger.exception(f"Ошибка выполнения при обработке вебхука: {rt_err}")
+             return 'Internal Server Error - App Not Initialized?', 500
         except Exception as e:
-            # Логируем полный трейсбек
+            # Логируем полный трейсбек для любых других ошибок
             logger.exception(f"Критическая ошибка обработки вебхука: {e}")
-            # Возвращаем 500, чтобы Telegram понял, что что-то не так, но не банил вебхук сразу
+            # Возвращаем 500, чтобы Telegram понял, что что-то не так
             return 'Internal Server Error', 500
     else:
         # Отвечаем на другие методы (например, GET от браузера)
@@ -388,16 +429,27 @@ def health_check():
     """Простой health check для Render"""
     logger.debug("Запрос на / (health check)")
     # Можно добавить проверку состояния бота, если нужно
-    return "OK - Bot service is running", 200
+    # Например, проверить self.telegram_app.initialized
+    app_status = "initialized" if bot_instance.telegram_app and bot_instance.telegram_app.initialized else "NOT initialized"
+    return f"OK - Bot service is running (Telegram App: {app_status})", 200
 
 # --- ТОЧКА ВХОДА ДЛЯ ЛОКАЛЬНОГО ЗАПУСКА (ЧЕРЕЗ POLLING) ---
 def main_local():
     """Запускает бота локально через polling (для отладки)"""
     logger.info("="*30)
     logger.info("ЗАПУСК БОТА ЛОКАЛЬНО ЧЕРЕЗ POLLING (НЕ ДЛЯ RENDER)")
+    logger.info("Используется глобальный экземпляр bot_instance.")
     logger.info("="*30)
-    # Используем глобальный bot_instance, созданный выше
-    bot_instance.telegram_app.run_polling()
+    # Используем глобальный bot_instance, созданный и инициализированный выше
+    # Важно: run_polling сам вызовет initialize, если еще не было,
+    # но мы уже сделали это в __init__, повторный вызов безопасен.
+    if bot_instance and bot_instance.telegram_app:
+         if not bot_instance.telegram_app.initialized:
+              logger.warning("Приложение Telegram не было инициализировано в __init__! Попытка инициализации через run_polling.")
+         bot_instance.telegram_app.run_polling()
+    else:
+         logger.critical("Экземпляр бота или приложения Telegram не создан, не могу запустить polling.")
+
 
 if __name__ == '__main__':
      main_local()
@@ -406,4 +458,4 @@ if __name__ == '__main__':
 # Render (Uvicorn) будет импортировать 'asgi_app' из этого файла.
 # Команда запуска в Render должна быть:
 # uvicorn bot.main:asgi_app --host 0.0.0.0 --port $PORT --workers 4
-# (или с другим числом воркеров)
+# (или с другим числом воркеров, или --workers 1 для простоты отладки)
