@@ -147,7 +147,7 @@ class AnimatorStatusBot:
         if self.sheets_manager and self.status_worksheet: # Google Sheets
             logger.debug("Попытка сохранения статуса в Google Sheets...")
             try:
-                 await self.sheets_manager.add_status_entry(self.status_worksheet, user_id, username, status, timestamp.strftime('%Y-%m-%d %H:%M:%S'))
+                 await self.sheets_manager.add_status_entry(user_id, username, status, timestamp.strftime('%Y-%m-%d %H:%M:%S'))
             except Exception as e: logger.error(f"Ошибка при вызове add_status_entry для Google Sheets: {e}", exc_info=True)
         else: logger.debug("Пропуск сохранения в Google Sheets.")
 
