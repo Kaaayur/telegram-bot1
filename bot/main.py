@@ -357,7 +357,7 @@ logger.info("ASGI обертка создана.")
 
 # --- МАРШРУТЫ FLASK (Остаются привязанными к flask_app) ---
 # Uvicorn через asgi_app будет передавать запросы сюда
-@flask_app.route(f'/{bot_instance.TOKEN}', methods=['POST'])
+@flask_app.route('/webhook', methods=['POST'])
 async def webhook():
     """Обработчик вебхука Telegram"""
     logger.debug(f"Входящий запрос на /webhook ({request.method})")
