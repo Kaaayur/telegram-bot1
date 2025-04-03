@@ -75,6 +75,7 @@ class AnimatorStatusBot:
         self.artist_mapping = {
             283779327: "Егор",
             413165965: "Настя",
+            6292548875: "Яна",
            
             # telegram_user_id: "Имя Фамилия или Псевдоним"
         }
