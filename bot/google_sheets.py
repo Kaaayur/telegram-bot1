@@ -1,13 +1,15 @@
-# В файле bot/google_sheets.py
+# Файл: bot/google_sheets.py
+
 import os
 import gspread
 # Используем старую библиотеку, раз она у вас есть
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 import logging
-import asyncio # <-- Добавлено
+import asyncio
+import functools # <-- Добавлен импорт
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__) # Используем имя модуля для логгера
 
 class GoogleSheetsManager:
     def __init__(self, credentials_path=None):
@@ -17,18 +19,20 @@ class GoogleSheetsManager:
         self.worksheet = None # <--- Инициализируем атрибут для хранения листа
 
         try:
-            # Определение пути к credentials (логика оставлена как есть)
+            # Определение пути к credentials
+            # TODO: Желательно передавать путь явно, а не импортировать Config здесь
             if not credentials_path:
-                # Попытка импортировать Config здесь может быть не лучшей идеей,
-                # лучше передавать путь явно при создании GoogleSheetsManager.
-                # Но оставим пока так, если это работает для вас.
                 try:
                     from bot.config import Config
-                    credentials_path = Config.GOOGLE_SHEETS_CREDENTIALS_JSON # Убедитесь, что это ПУТЬ, а не сам JSON
-                    logger.warning("Получение пути credentials из Config - убедитесь, что Config.GOOGLE_SHEETS_CREDENTIALS_JSON содержит ПУТЬ к файлу.")
+                    # УБЕДИТЕСЬ, ЧТО ЗДЕСЬ ХРАНИТСЯ ПУТЬ К ФАЙЛУ, А НЕ JSON-СТРОКА
+                    credentials_path = Config.GOOGLE_SHEETS_CREDENTIALS_JSON
+                    logger.warning("Используется путь к credentials из Config. Убедитесь, что Config.GOOGLE_SHEETS_CREDENTIALS_JSON - это ПУТЬ.")
                 except ImportError:
                     logger.error("Не удалось импортировать Config для получения пути к credentials.")
                     raise ValueError("Путь к credentials не указан и Config не найден.")
+                except AttributeError:
+                    logger.error("В Config не найден атрибут GOOGLE_SHEETS_CREDENTIALS_JSON")
+                    raise ValueError("Атрибут GOOGLE_SHEETS_CREDENTIALS_JSON не найден в Config")
 
 
             scope = [
@@ -38,11 +42,11 @@ class GoogleSheetsManager:
 
             # Проверка существования файла credentials
             if not os.path.exists(credentials_path):
-                logger.error(f"Файл credentials не найден: {credentials_path}")
-                # Не бросаем исключение сразу, а устанавливаем client в None
-                # raise FileNotFoundError(f"Файл {credentials_path} не найден")
-                return # Завершаем инициализацию, self.client останется None
+                logger.error(f"Файл credentials не найден по указанному пути: {credentials_path}")
+                # Не бросаем исключение, а просто завершаем инициализацию
+                return # self.client останется None
 
+            logger.info(f"Используется файл credentials: {credentials_path}")
             # Аутентификация
             creds = ServiceAccountCredentials.from_json_keyfile_name(
                 credentials_path,
@@ -54,7 +58,7 @@ class GoogleSheetsManager:
 
         except FileNotFoundError as fnf_err:
              # Ловим ошибку отсутствия файла credentials явно
-             logger.error(f"Ошибка инициализации Google Sheets: {fnf_err}")
+             logger.error(f"Ошибка инициализации Google Sheets (файл не найден): {fnf_err}")
              # self.client останется None
         except Exception as e:
             logger.error(f"Неожиданная ошибка инициализации Google Sheets: {e}", exc_info=True)
@@ -69,7 +73,7 @@ class GoogleSheetsManager:
         try:
             spreadsheet = self.client.open(spreadsheet_name)
             logger.info(f"Таблица '{spreadsheet_name}' успешно открыта.")
-            # Сохраняем ссылку на таблицу, может пригодиться
+            # Сохраняем ссылку на таблицу
             self.spreadsheet = spreadsheet
             return spreadsheet
         except gspread.SpreadsheetNotFound:
@@ -99,17 +103,18 @@ class GoogleSheetsManager:
                 worksheet = spreadsheet.add_worksheet(
                     title=worksheet_name,
                     rows=1000, # Начальное количество строк
-                    cols=10    # Начальное количество колонок
+                    cols=10    # Начальное количество колонок (достаточно для 5 столбцов)
                 )
                 logger.info(f"Рабочий лист '{worksheet_name}' успешно создан.")
                 # Сохраняем созданный лист
                 self.worksheet = worksheet # <--- Сохраняем объект листа
 
-                # Инициализация заголовков (добавляем User ID)
+                # Инициализация заголовков (User ID, Дата, Артист, Статус, Время)
                 headers = ['User ID', 'Дата', 'Артист', 'Статус', 'Время']
                 # Выполняем синхронно, так как это часть инициализации
+                # Используем value_input_option='USER_ENTERED' для правильного форматирования
                 self.worksheet.append_row(headers, value_input_option='USER_ENTERED')
-                logger.info(f"Заголовки добавлены в лист '{worksheet_name}'.")
+                logger.info(f"Заголовки {headers} добавлены в лист '{worksheet_name}'.")
 
             except Exception as e_add:
                 logger.error(f"Ошибка создания нового листа '{worksheet_name}': {e_add}", exc_info=True)
@@ -122,7 +127,6 @@ class GoogleSheetsManager:
         # Возвращаем сохраненный объект листа (или None, если не удалось)
         return self.worksheet
 
-    # ИЗМЕНЕНО: async def и аргументы
     async def add_status_entry(self, user_id, username, status, timestamp_str):
         """
         Асинхронно добавляет запись о статусе в Google Sheets,
@@ -134,27 +138,23 @@ class GoogleSheetsManager:
             return # Не можем продолжить
 
         try:
-            # Пытаемся распарсить переданную строку времени обратно в datetime,
-            # чтобы извлечь дату и время отдельно, как в оригинальном коде.
-            # Если формат всегда '%Y-%m-%d %H:%M:%S', это сработает.
+            # Парсим переданную строку времени
             try:
                 ts_datetime = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
-                date_str = ts_datetime.strftime('%d.%m.%Y')
-                time_str = ts_datetime.strftime('%H:%M:%S')
+                date_str = ts_datetime.strftime('%d.%m.%Y') # Формат даты как в оригинале
+                time_str = ts_datetime.strftime('%H:%M:%S') # Формат времени как в оригинале
             except ValueError:
-                # Если парсинг не удался, используем строку как есть или текущее время
-                logger.warning(f"Не удалось распарсить timestamp_str '{timestamp_str}', используем как есть и текущее время.")
-                # В качестве запасного варианта можно использовать всю строку или текущую дату/время
+                # Если парсинг не удался, используем запасной вариант
+                logger.warning(f"Не удалось распарсить timestamp_str '{timestamp_str}'. Используется текущее время.")
                 current_time = datetime.now()
                 date_str = current_time.strftime('%d.%m.%Y')
                 time_str = current_time.strftime('%H:%M:%S')
-                # Или можно просто использовать timestamp_str для одного из полей
 
-            # Формируем строку данных, включая user_id
+            # Формируем строку данных для таблицы
             row_data = [
-                user_id,                           # User ID (новый столбец)
+                user_id,                           # User ID
                 date_str,                          # Дата
-                username or f'ID:{user_id}',       # Артист (добавили ID как fallback)
+                username or f'ID:{user_id}',       # Артист (с fallback на ID)
                 status,                            # Статус
                 time_str                           # Время
             ]
@@ -162,18 +162,24 @@ class GoogleSheetsManager:
             # Получаем текущий event loop
             loop = asyncio.get_running_loop()
 
-            # Выполняем блокирующий вызов append_row в отдельном потоке
+            # Создаем частичную функцию для append_row с нужными keyword аргументами
+            append_func_with_option = functools.partial(
+                self.worksheet.append_row,
+                value_input_option='USER_ENTERED' # Передаем как именованный аргумент
+            )
+
+            # Выполняем блокирующий вызов gspread в отдельном потоке
             await loop.run_in_executor(
-                None,                              # Использовать executor по умолчанию (ThreadPoolExecutor)
-                self.worksheet.append_row,         # Метод, который нужно выполнить
-                row_data,                          # Аргументы для метода append_row
-                {'value_input_option': 'USER_ENTERED'} # Доп. параметры для append_row
+                None,                       # Использовать executor по умолчанию
+                append_func_with_option,    # Вызываем partial функцию
+                row_data                    # Передаем данные как позиционный аргумент
             )
 
             logger.info(f"Запись для {username} ({user_id}) успешно добавлена в Google Sheets.")
 
         except AttributeError as ae:
-             # Эта ошибка означает, что self.worksheet - не объект gspread Worksheet
-             logger.error(f"Ошибка атрибута при добавлении записи (ожидался объект Worksheet, но self.worksheet={type(self.worksheet)}): {ae}", exc_info=True)
+             # Ошибка, если self.worksheet не является ожидаемым объектом
+             logger.error(f"Ошибка атрибута при добавлении записи (self.worksheet={type(self.worksheet)}): {ae}", exc_info=True)
         except Exception as e:
+            # Ловим другие возможные ошибки gspread или asyncio
             logger.error(f"Ошибка добавления записи в Google Sheets: {e}", exc_info=True)
