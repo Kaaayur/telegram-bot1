@@ -12,6 +12,7 @@ import sqlite3
 from datetime import datetime
 import asyncio
 from asgiref.wsgi import WsgiToAsgi
+from zoneinfo import ZoneInfo # <--- ДОБАВЛЕН ИМПОРТ
 
 # --- НАСТРОЙКА ---
 CREDENTIALS_FILE_PATH = "credentials.json"
@@ -22,6 +23,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- СОЗДАНИЕ ФАЙЛА УЧЕТНЫХ ДАННЫХ GOOGLE ПРИ ЗАПУСКЕ ---
+# (Код без изменений)
 GOOGLE_CREDS_AVAILABLE = False
 try:
     google_creds_json_str = os.environ.get('GOOGLE_SHEETS_CREDENTIALS_JSON', '{}')
@@ -36,6 +38,7 @@ except (ValueError, json.JSONDecodeError, FileNotFoundError, OSError) as e:
     logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА при создании файла {CREDENTIALS_FILE_PATH}: {e}", exc_info=True)
 
 # --- КЛАССЫ КОНФИГУРАЦИИ И МЕНЕДЖЕР GOOGLE SHEETS ---
+# (Код без изменений)
 try:
     from bot.config import Config
     logger.info("Успешно импортирован Config из bot.config")
@@ -43,8 +46,7 @@ except ImportError:
     logger.warning("Не удалось импортировать Config из bot.config. Используется заглушка Config из main.py.")
     class Config:
         BOT_TOKEN = os.getenv('BOT_TOKEN')
-        if not BOT_TOKEN:
-            logger.critical("Переменная окружения BOT_TOKEN не установлена!")
+        if not BOT_TOKEN: logger.critical("Переменная окружения BOT_TOKEN не установлена!")
         GOOGLE_SHEETS_SPREADSHEET_NAME = os.getenv('GOOGLE_SHEETS_SPREADSHEET_NAME', "АнимельБот")
         GOOGLE_SHEETS_WORKSHEET_NAME = os.getenv('GOOGLE_SHEETS_WORKSHEET_NAME', "Статусы")
 
@@ -55,7 +57,6 @@ try:
 except ImportError:
     logger.critical("❌ КРИТИЧЕСКАЯ ОШИБКА: Не удалось импортировать GoogleSheetsManager из bot.google_sheets. Работа с таблицами невозможна.")
     HAS_GOOGLE_SHEETS_MANAGER = False
-    # Определяем пустую заглушку, чтобы код не упал
     class GoogleSheetsManager: pass
 
 
@@ -64,23 +65,20 @@ class AnimatorStatusBot:
     def __init__(self):
         load_dotenv()
         self.TOKEN = Config.BOT_TOKEN
-        if not self.TOKEN:
-             raise ValueError("Не удалось получить токен бота из Config.")
+        if not self.TOKEN: raise ValueError("Не удалось получить токен бота из Config.")
 
         self.DATABASE_PATH = 'animator_statuses.db'
         self.VALID_STATUSES = ['в пути', 'на месте', 'закончил']
         self._app_initialized = False
 
-        # --- СЛОВАРЬ ID -> Имя Артиста ---
         # !!! ЗАПОЛНИТЕ ЭТОТ СЛОВАРЬ ВАШИМИ ДАННЫМИ !!!
         self.artist_mapping = {
-            283779327: "Егор",   # Пример из ваших логов
+            283779327: "Егор",
             413165965: "Настя",
-            # Добавьте сюда всех ваших артистов
+           
             # telegram_user_id: "Имя Фамилия или Псевдоним"
         }
         logger.info(f"Загружена карта артистов: {len(self.artist_mapping)} записей")
-        # --- КОНЕЦ СЛОВАРЯ ---
 
         self.setup_database()
         self.setup_google_sheets()
@@ -88,46 +86,31 @@ class AnimatorStatusBot:
         logger.info("Экземпляр AnimatorStatusBot создан. Инициализация Telegram App будет при первом запросе.")
 
     def setup_database(self):
-        """Создает таблицу SQLite, если она не существует."""
+        # (Код без изменений)
         try:
-            conn = sqlite3.connect(self.DATABASE_PATH)
-            cursor = conn.cursor()
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS statuses (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER NOT NULL,
-                    username TEXT,
-                    status TEXT NOT NULL,
-                    timestamp DATETIME NOT NULL
-                )
-            ''')
-            conn.commit()
-            conn.close()
+            conn = sqlite3.connect(self.DATABASE_PATH); cursor = conn.cursor()
+            cursor.execute('''CREATE TABLE IF NOT EXISTS statuses (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, username TEXT, status TEXT NOT NULL, timestamp DATETIME NOT NULL)''')
+            conn.commit(); conn.close()
             logger.info(f"База данных SQLite '{self.DATABASE_PATH}' настроена.")
-        except sqlite3.Error as e:
-            logger.error(f"Ошибка настройки SQLite '{self.DATABASE_PATH}': {e}")
+        except sqlite3.Error as e: logger.error(f"Ошибка настройки SQLite '{self.DATABASE_PATH}': {e}")
 
     def setup_google_sheets(self):
-        """Инициализирует менеджер Google Sheets (если он был импортирован)."""
+        # (Код без изменений)
         self.sheets_manager = None
         self.status_worksheet = None
-        # Проверяем, был ли класс успешно импортирован
         if HAS_GOOGLE_SHEETS_MANAGER:
             if GOOGLE_CREDS_AVAILABLE:
                 logger.info("Учетные данные Google доступны, попытка настройки Google Sheets...")
                 try:
                     self.sheets_manager = GoogleSheetsManager(credentials_path=CREDENTIALS_FILE_PATH)
-                    # Проверяем успешность инициализации клиента внутри менеджера
                     if hasattr(self.sheets_manager, 'client') and self.sheets_manager.client:
                         spreadsheet_name = Config.GOOGLE_SHEETS_SPREADSHEET_NAME
                         worksheet_name = Config.GOOGLE_SHEETS_WORKSHEET_NAME
                         logger.info(f"Попытка открыть таблицу '{spreadsheet_name}' и лист '{worksheet_name}'...")
                         spreadsheet = self.sheets_manager.open_spreadsheet(spreadsheet_name)
                         if spreadsheet:
-                            # Получаем или создаем лист, менеджер должен сохранить его в self.worksheet
                             worksheet = self.sheets_manager.create_or_get_worksheet(spreadsheet, worksheet_name)
                             if worksheet:
-                                # Сохраняем для проверки перед вызовом add_status_entry
                                 self.status_worksheet = worksheet
                                 logger.info(f"Подключение к Google Sheets ({spreadsheet_name}/{worksheet_name}) успешно установлено.")
                             else: logger.warning("Не удалось получить или создать рабочий лист Google Sheets.")
@@ -135,43 +118,48 @@ class AnimatorStatusBot:
                     else: logger.warning("Менеджер Google Sheets создан, но клиент gspread не был инициализирован.")
                 except Exception as e: logger.error(f"Неожиданная ошибка при настройке Google Sheets: {e}", exc_info=True)
             else: logger.warning("Учетные данные Google недоступны. Google Sheets не будут использоваться.")
-        else:
-             logger.warning("Класс GoogleSheetsManager не импортирован. Работа с Google Sheets невозможна.")
+        else: logger.warning("Класс GoogleSheetsManager не импортирован. Работа с Google Sheets невозможна.")
 
 
     async def save_status(self, user_id: int, username: str, status: str):
-        """Асинхронно сохраняет статус в SQLite и Google Sheets с реальным именем."""
-        timestamp = datetime.now()
-        timestamp_str = timestamp.strftime('%Y-%m-%d %H:%M:%S') # Строка для Google Sheets
+        """Асинхронно сохраняет статус в SQLite и Google Sheets с реальным именем и МОСКОВСКИМ временем."""
 
-        # Получаем реальное имя артиста из словаря
-        real_artist_name = self.artist_mapping.get(user_id, username or f"ID:{user_id}") # Fallback на username или ID
-        logger.info(f"Сохранение статуса: User ID={user_id}, TG Username='{username}', Real Name='{real_artist_name}', Status='{status}', Time={timestamp}")
+        # --- ИЗМЕНЕНО: Получаем время по Москве ---
+        moscow_tz = ZoneInfo("Europe/Moscow")
+        timestamp_msk = datetime.now(moscow_tz) # Текущее время сразу в нужной таймзоне
+        timestamp_str = timestamp_msk.strftime('%Y-%m-%d %H:%M:%S') # Строка для Google Sheets
+        # --- КОНЕЦ ИЗМЕНЕНИЯ ---
 
-        # Сохранение в SQLite (оставляем для истории или других нужд)
+        real_artist_name = self.artist_mapping.get(user_id, username or f"ID:{user_id}")
+        # --- ИЗМЕНЕНО: Логируем время MSK ---
+        logger.info(f"Сохранение статуса: User ID={user_id}, TG Username='{username}', Real Name='{real_artist_name}', Status='{status}', Time (MSK)={timestamp_msk}")
+        # --- КОНЕЦ ИЗМЕНЕНИЯ ---
+
+        # Сохранение в SQLite (передаем объект datetime, sqlite3 его обработает)
         try:
             conn = sqlite3.connect(self.DATABASE_PATH); cursor = conn.cursor()
-            cursor.execute('INSERT INTO statuses (user_id, username, status, timestamp) VALUES (?, ?, ?, ?)',(user_id, username, status, timestamp))
+            # --- ИЗМЕНЕНО: Передаем timestamp_msk ---
+            cursor.execute('INSERT INTO statuses (user_id, username, status, timestamp) VALUES (?, ?, ?, ?)',(user_id, username, status, timestamp_msk))
+            # --- КОНЕЦ ИЗМЕНЕНИЯ ---
             conn.commit(); conn.close()
             logger.debug("Статус успешно сохранен в SQLite.")
         except sqlite3.Error as e: logger.error(f"Ошибка сохранения статуса в SQLite: {e}")
 
-        # Сохранение в Google Sheets (только Дата, Имя, Статус, Время)
-        # Проверяем наличие менеджера и успешно инициализированного листа
+        # Сохранение в Google Sheets (передаем строку с московским временем)
         if self.sheets_manager and self.status_worksheet:
             logger.debug("Попытка сохранения статуса в Google Sheets...")
             try:
-                 # Передаем только нужные данные для таблицы
+                 # Передаем те же аргументы, но timestamp_str теперь содержит московское время
                  await self.sheets_manager.add_status_entry(
-                     real_artist_name, # Имя артиста
-                     status,           # Статус
-                     timestamp_str     # Строка времени (дата извлечется внутри)
+                     real_artist_name,
+                     status,
+                     timestamp_str # Эта строка уже отформатирована с учетом MSK
                  )
             except Exception as e: logger.error(f"Ошибка при вызове add_status_entry для Google Sheets: {e}", exc_info=True)
-        else: logger.debug("Пропуск сохранения в Google Sheets (менеджер или лист не инициализированы).")
+        else: logger.debug("Пропуск сохранения в Google Sheets.")
 
     def extract_status(self, text: str) -> Optional[str]:
-        """Извлекает первый найденный допустимый статус из текста сообщения."""
+        # (Код без изменений)
         if not text: return None
         text_lower = text.lower()
         for status in self.VALID_STATUSES:
@@ -179,7 +167,7 @@ class AnimatorStatusBot:
         return None
 
     def create_telegram_app(self):
-        """Создает, но НЕ инициализирует экземпляр telegram.ext.Application."""
+        # (Код без изменений)
         if not self.TOKEN: raise ValueError("Токен бота не определен.")
         application = Application.builder().token(self.TOKEN).build()
         application.add_handler(CommandHandler('start', self.start_command))
@@ -189,13 +177,13 @@ class AnimatorStatusBot:
 
     # --- Обработчики Telegram ---
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработчик команды /start."""
+        # (Код без изменений)
         user = update.effective_user
         logger.info(f"Получена команда /start от пользователя {user.id} ({user.username})")
         await update.message.reply_text(f"Привет! Отправь статус: '{', '.join(self.VALID_STATUSES)}'.")
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработчик текстовых сообщений."""
+        # (Код без изменений)
         if not update.message or not update.message.text: return
         user = update.effective_user; text = update.message.text
         username = user.username or f"{user.first_name} {user.last_name or ''}".strip() or f"ID:{user.id}"
@@ -203,12 +191,12 @@ class AnimatorStatusBot:
         status = self.extract_status(text)
         if status:
             logger.info(f"Распознан статус: '{status}'")
-            await self.save_status(user.id, username, status) # Передаем ID и username
+            await self.save_status(user.id, username, status)
             await update.message.reply_text(f"✅ Статус '{status}' сохранен.")
         else: logger.debug(f"Допустимый статус не найден в сообщении.")
 
     async def _ensure_initialized(self):
-        """Внутренний метод для ленивой инициализации Telegram App."""
+        # (Код без изменений)
         if not self._app_initialized:
             logger.info("Выполняется первая инициализация приложения Telegram (Application.initialize)...")
             try:
@@ -220,15 +208,16 @@ class AnimatorStatusBot:
                 raise RuntimeError("Failed to initialize Telegram Application on first use") from e
 
     async def process_update(self, update_json: Dict):
-        """Обрабатывает JSON обновления, убедившись, что приложение инициализировано."""
+        # (Код без изменений)
         logger.debug(f"Обработка JSON обновления: {update_json}")
-        await self._ensure_initialized() # Гарантирует, что initialize() был вызван
+        await self._ensure_initialized()
         update = Update.de_json(update_json, self.telegram_app.bot)
         await self.telegram_app.process_update(update)
         logger.debug("Обновление успешно передано в telegram_app.process_update")
 
 
 # --- ГЛОБАЛЬНЫЕ ЭКЗЕМПЛЯРЫ И ASGI/WSGI ПРИЛОЖЕНИЯ ---
+# (Код без изменений)
 logger.info("Создание глобального экземпляра AnimatorStatusBot...")
 try:
     bot_instance = AnimatorStatusBot()
@@ -246,16 +235,14 @@ asgi_app = WsgiToAsgi(flask_app)
 logger.info("ASGI обертка создана.")
 
 # --- МАРШРУТЫ FLASK ---
+# (Код без изменений)
 @flask_app.route('/webhook', methods=['POST'])
 async def webhook():
-    """Обработчик вебхука Telegram."""
     worker_pid = os.getpid()
     logger.debug(f"[Worker {worker_pid}] Входящий запрос на /webhook ({request.method}) от {request.remote_addr}")
-
     if bot_instance is None:
          logger.error(f"[Worker {worker_pid}] /webhook: Экземпляр бота не был создан!")
          return 'Internal Server Error: Bot instance not available', 500
-
     if request.method == "POST":
         try:
             update_json = request.get_json(force=True)
@@ -284,14 +271,13 @@ async def webhook():
 
 @flask_app.route('/')
 def health_check():
-    """Простой health check."""
     logger.debug("Запрос на / (health check)")
     bot_status = "created" if bot_instance else "NOT CREATED"
     return f"OK - Bot service is running (Bot instance: {bot_status})", 200
 
 # --- ТОЧКА ВХОДА ДЛЯ ЛОКАЛЬНОГО ЗАПУСКА (ЧЕРЕЗ POLLING) ---
+# (Код без изменений)
 def main_local():
-    """Запускает бота локально через polling."""
     logger.info("="*30); logger.info("ЗАПУСК БОТА ЛОКАЛЬНО ЧЕРЕЗ POLLING"); logger.info("="*30)
     if bot_instance and bot_instance.telegram_app:
          logger.info("Используется глобальный экземпляр бота. Запуск polling...")
