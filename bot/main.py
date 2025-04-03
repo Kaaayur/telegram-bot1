@@ -1,4 +1,4 @@
-# /opt/render/project/src/bot/main.py
+# Файл: bot/main.py
 
 import os
 import logging
@@ -17,7 +17,7 @@ from asgiref.wsgi import WsgiToAsgi
 CREDENTIALS_FILE_PATH = "credentials.json"
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - [PID:%(process)d] - %(message)s' # Добавлен PID в формат
+    format='%(asctime)s - %(name)s - %(levelname)s - [PID:%(process)d] - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
@@ -37,29 +37,26 @@ except (ValueError, json.JSONDecodeError, FileNotFoundError, OSError) as e:
 
 # --- КЛАССЫ КОНФИГУРАЦИИ И МЕНЕДЖЕР GOOGLE SHEETS ---
 try:
-    # Пытаемся импортировать ваш Config
     from bot.config import Config
     logger.info("Успешно импортирован Config из bot.config")
 except ImportError:
     logger.warning("Не удалось импортировать Config из bot.config. Используется заглушка Config из main.py.")
-    # --- Заглушка Config ---
     class Config:
         BOT_TOKEN = os.getenv('BOT_TOKEN')
         if not BOT_TOKEN:
-            logger.critical("Переменная окружения BOT_TOKEN не установлена! Бот не сможет запуститься.")
+            logger.critical("Переменная окружения BOT_TOKEN не установлена!")
         GOOGLE_SHEETS_SPREADSHEET_NAME = os.getenv('GOOGLE_SHEETS_SPREADSHEET_NAME', "АнимельБот")
         GOOGLE_SHEETS_WORKSHEET_NAME = os.getenv('GOOGLE_SHEETS_WORKSHEET_NAME', "Статусы")
 
 try:
-    # Пытаемся импортировать ваш GoogleSheetsManager
     from bot.google_sheets import GoogleSheetsManager
     logger.info("Успешно импортирован GoogleSheetsManager из bot.google_sheets")
+    HAS_GOOGLE_SHEETS_MANAGER = True
 except ImportError:
     logger.critical("❌ КРИТИЧЕСКАЯ ОШИБКА: Не удалось импортировать GoogleSheetsManager из bot.google_sheets. Работа с таблицами невозможна.")
-    # Определяем заглушку, чтобы код не упал при создании экземпляра, но он будет бесполезен
-    class GoogleSheetsManager:
-        def __init__(self, credentials_path=None): logger.error("Используется бесполезная заглушка GoogleSheetsManager!")
-        async def add_status_entry(self, *args, **kwargs): logger.error("Попытка записи через заглушку GoogleSheetsManager!")
+    HAS_GOOGLE_SHEETS_MANAGER = False
+    # Определяем пустую заглушку, чтобы код не упал
+    class GoogleSheetsManager: pass
 
 
 # --- КЛАСС БОТА ---
@@ -72,17 +69,23 @@ class AnimatorStatusBot:
 
         self.DATABASE_PATH = 'animator_statuses.db'
         self.VALID_STATUSES = ['в пути', 'на месте', 'закончил']
-
-        # --- ИЗМЕНЕНИЕ: Флаг инициализации ---
         self._app_initialized = False
-        # ---------------------------------------
+
+        # --- СЛОВАРЬ ID -> Имя Артиста ---
+        # !!! ЗАПОЛНИТЕ ЭТОТ СЛОВАРЬ ВАШИМИ ДАННЫМИ !!!
+        self.artist_mapping = {
+            283779327: "Егор",   # Пример из ваших логов
+            413165965: "Настя",
+            # Добавьте сюда всех ваших артистов
+            # telegram_user_id: "Имя Фамилия или Псевдоним"
+        }
+        logger.info(f"Загружена карта артистов: {len(self.artist_mapping)} записей")
+        # --- КОНЕЦ СЛОВАРЯ ---
 
         self.setup_database()
         self.setup_google_sheets()
-        # Просто создаем приложение, но НЕ инициализируем его здесь
         self.telegram_app = self.create_telegram_app()
         logger.info("Экземпляр AnimatorStatusBot создан. Инициализация Telegram App будет при первом запросе.")
-        # --- УБРАН БЛОК ИНИЦИАЛИЗАЦИИ TELEGRAM ИЗ __init__ ---
 
     def setup_database(self):
         """Создает таблицу SQLite, если она не существует."""
@@ -108,48 +111,64 @@ class AnimatorStatusBot:
         """Инициализирует менеджер Google Sheets (если он был импортирован)."""
         self.sheets_manager = None
         self.status_worksheet = None
-        # Проверяем, существует ли класс GoogleSheetsManager (не заглушка)
-        if 'GoogleSheetsManager' in globals() and not getattr(GoogleSheetsManager, '__module__', '').endswith('main'):
+        # Проверяем, был ли класс успешно импортирован
+        if HAS_GOOGLE_SHEETS_MANAGER:
             if GOOGLE_CREDS_AVAILABLE:
                 logger.info("Учетные данные Google доступны, попытка настройки Google Sheets...")
                 try:
                     self.sheets_manager = GoogleSheetsManager(credentials_path=CREDENTIALS_FILE_PATH)
-                    if hasattr(self.sheets_manager, 'client') and self.sheets_manager.client: # Проверяем наличие атрибута client
+                    # Проверяем успешность инициализации клиента внутри менеджера
+                    if hasattr(self.sheets_manager, 'client') and self.sheets_manager.client:
                         spreadsheet_name = Config.GOOGLE_SHEETS_SPREADSHEET_NAME
                         worksheet_name = Config.GOOGLE_SHEETS_WORKSHEET_NAME
                         logger.info(f"Попытка открыть таблицу '{spreadsheet_name}' и лист '{worksheet_name}'...")
                         spreadsheet = self.sheets_manager.open_spreadsheet(spreadsheet_name)
                         if spreadsheet:
+                            # Получаем или создаем лист, менеджер должен сохранить его в self.worksheet
                             worksheet = self.sheets_manager.create_or_get_worksheet(spreadsheet, worksheet_name)
                             if worksheet:
+                                # Сохраняем для проверки перед вызовом add_status_entry
                                 self.status_worksheet = worksheet
                                 logger.info(f"Подключение к Google Sheets ({spreadsheet_name}/{worksheet_name}) успешно установлено.")
                             else: logger.warning("Не удалось получить или создать рабочий лист Google Sheets.")
                         else: logger.warning("Не удалось открыть таблицу Google Sheets.")
-                    else: logger.warning("Менеджер Google Sheets создан, но не имеет атрибута 'client' или клиент не инициализирован.")
+                    else: logger.warning("Менеджер Google Sheets создан, но клиент gspread не был инициализирован.")
                 except Exception as e: logger.error(f"Неожиданная ошибка при настройке Google Sheets: {e}", exc_info=True)
             else: logger.warning("Учетные данные Google недоступны. Google Sheets не будут использоваться.")
         else:
-             logger.warning("Класс GoogleSheetsManager не был импортирован или используется заглушка. Работа с Google Sheets невозможна.")
+             logger.warning("Класс GoogleSheetsManager не импортирован. Работа с Google Sheets невозможна.")
 
 
     async def save_status(self, user_id: int, username: str, status: str):
-        """Асинхронно сохраняет статус в SQLite и (если настроено) в Google Sheets."""
+        """Асинхронно сохраняет статус в SQLite и Google Sheets с реальным именем."""
         timestamp = datetime.now()
-        logger.info(f"Сохранение статуса: User ID={user_id}, Username='{username}', Status='{status}', Time={timestamp}")
-        try: # SQLite
+        timestamp_str = timestamp.strftime('%Y-%m-%d %H:%M:%S') # Строка для Google Sheets
+
+        # Получаем реальное имя артиста из словаря
+        real_artist_name = self.artist_mapping.get(user_id, username or f"ID:{user_id}") # Fallback на username или ID
+        logger.info(f"Сохранение статуса: User ID={user_id}, TG Username='{username}', Real Name='{real_artist_name}', Status='{status}', Time={timestamp}")
+
+        # Сохранение в SQLite (оставляем для истории или других нужд)
+        try:
             conn = sqlite3.connect(self.DATABASE_PATH); cursor = conn.cursor()
             cursor.execute('INSERT INTO statuses (user_id, username, status, timestamp) VALUES (?, ?, ?, ?)',(user_id, username, status, timestamp))
             conn.commit(); conn.close()
             logger.debug("Статус успешно сохранен в SQLite.")
         except sqlite3.Error as e: logger.error(f"Ошибка сохранения статуса в SQLite: {e}")
 
-        if self.sheets_manager and self.status_worksheet: # Google Sheets
+        # Сохранение в Google Sheets (только Дата, Имя, Статус, Время)
+        # Проверяем наличие менеджера и успешно инициализированного листа
+        if self.sheets_manager and self.status_worksheet:
             logger.debug("Попытка сохранения статуса в Google Sheets...")
             try:
-                 await self.sheets_manager.add_status_entry(user_id, username, status, timestamp.strftime('%Y-%m-%d %H:%M:%S'))
+                 # Передаем только нужные данные для таблицы
+                 await self.sheets_manager.add_status_entry(
+                     real_artist_name, # Имя артиста
+                     status,           # Статус
+                     timestamp_str     # Строка времени (дата извлечется внутри)
+                 )
             except Exception as e: logger.error(f"Ошибка при вызове add_status_entry для Google Sheets: {e}", exc_info=True)
-        else: logger.debug("Пропуск сохранения в Google Sheets.")
+        else: logger.debug("Пропуск сохранения в Google Sheets (менеджер или лист не инициализированы).")
 
     def extract_status(self, text: str) -> Optional[str]:
         """Извлекает первый найденный допустимый статус из текста сообщения."""
@@ -184,33 +203,28 @@ class AnimatorStatusBot:
         status = self.extract_status(text)
         if status:
             logger.info(f"Распознан статус: '{status}'")
-            await self.save_status(user.id, username, status)
+            await self.save_status(user.id, username, status) # Передаем ID и username
             await update.message.reply_text(f"✅ Статус '{status}' сохранен.")
         else: logger.debug(f"Допустимый статус не найден в сообщении.")
 
     async def _ensure_initialized(self):
-        """Внутренний метод для ленивой инициализации."""
+        """Внутренний метод для ленивой инициализации Telegram App."""
         if not self._app_initialized:
             logger.info("Выполняется первая инициализация приложения Telegram (Application.initialize)...")
             try:
                 await self.telegram_app.initialize()
-                self._app_initialized = True # Помечаем как инициализированное ТОЛЬКО после успеха
+                self._app_initialized = True
                 logger.info("Приложение Telegram успешно инициализировано при первом использовании.")
             except Exception as e:
                 logger.critical(f"КРИТИЧЕСКАЯ ОШИБКА ПРИ ПОПЫТКЕ ЛЕНИВОЙ ИНИЦИАЛИЗАЦИИ TELEGRAM: {e}", exc_info=True)
-                # Перевыбрасываем исключение, чтобы обработчик вебхука вернул ошибку 500
                 raise RuntimeError("Failed to initialize Telegram Application on first use") from e
 
     async def process_update(self, update_json: Dict):
-        """
-        Обрабатывает JSON обновления, убедившись, что приложение инициализировано.
-        """
+        """Обрабатывает JSON обновления, убедившись, что приложение инициализировано."""
         logger.debug(f"Обработка JSON обновления: {update_json}")
-        # --- ИЗМЕНЕНИЕ: Ленивая инициализация ---
-        await self._ensure_initialized() # Гарантирует, что initialize() был вызван хотя бы раз
-        # -----------------------------------------
+        await self._ensure_initialized() # Гарантирует, что initialize() был вызван
         update = Update.de_json(update_json, self.telegram_app.bot)
-        await self.telegram_app.process_update(update) # Теперь вызывается для инициализированного приложения
+        await self.telegram_app.process_update(update)
         logger.debug("Обновление успешно передано в telegram_app.process_update")
 
 
@@ -248,23 +262,17 @@ async def webhook():
             if not update_json:
                  logger.warning(f"[Worker {worker_pid}] /webhook: Пустой JSON.")
                  return 'Bad Request: Empty JSON', 400
-
-            # process_update теперь сам позаботится об инициализации при первом вызове
             await bot_instance.process_update(update_json)
-
             logger.info(f"[Worker {worker_pid}] /webhook: Вебхук успешно обработан.")
             return 'OK', 200
-
         except json.JSONDecodeError as json_err:
              logger.error(f"[Worker {worker_pid}] /webhook: Ошибка декодирования JSON: {json_err}")
              return 'Bad Request: Invalid JSON', 400
-        # Ловим ошибку, если ленивая инициализация в _ensure_initialized не удалась
         except RuntimeError as rt_err:
-             if "Failed to initialize Telegram Application" in str(rt_err) \
-             or "Application was not initialized" in str(rt_err): # На всякий случай ловим и старую ошибку
+             if "Failed to initialize Telegram Application" in str(rt_err) or "Application was not initialized" in str(rt_err):
                   logger.exception(f"[Worker {worker_pid}] /webhook: КРИТИЧЕСКАЯ ОШИБКА - Не удалось инициализировать приложение Telegram: {rt_err}")
                   return 'Internal Server Error - TG App Initialization Failed', 500
-             else: # Другая ошибка RuntimeError
+             else:
                   logger.exception(f"[Worker {worker_pid}] /webhook: Неожиданная ошибка RuntimeError: {rt_err}")
                   return 'Internal Server Error', 500
         except Exception as e:
@@ -278,9 +286,7 @@ async def webhook():
 def health_check():
     """Простой health check."""
     logger.debug("Запрос на / (health check)")
-    # Проверяем, создан ли экземпляр бота
     bot_status = "created" if bot_instance else "NOT CREATED"
-    # Состояние инициализации теперь проверяется при первом запросе
     return f"OK - Bot service is running (Bot instance: {bot_status})", 200
 
 # --- ТОЧКА ВХОДА ДЛЯ ЛОКАЛЬНОГО ЗАПУСКА (ЧЕРЕЗ POLLING) ---
@@ -289,7 +295,6 @@ def main_local():
     logger.info("="*30); logger.info("ЗАПУСК БОТА ЛОКАЛЬНО ЧЕРЕЗ POLLING"); logger.info("="*30)
     if bot_instance and bot_instance.telegram_app:
          logger.info("Используется глобальный экземпляр бота. Запуск polling...")
-         # run_polling сам вызовет initialize, если он еще не был вызван (лениво).
          bot_instance.telegram_app.run_polling()
          logger.info("Polling завершен.")
     else: logger.critical("Не удалось запустить polling: экземпляр бота не создан.")
@@ -298,4 +303,4 @@ if __name__ == '__main__':
      main_local()
 
 # --- ТОЧКА ВХОДА ДЛЯ RENDER (UVICORN) ---
-# uvicorn bot.main:asgi_app --host 0.0.0.0 --port $PORT --workers 1 # <-- РЕКОМЕНДУЕТСЯ НАЧАТЬ С 1 ВОРКЕРА
+# uvicorn bot.main:asgi_app --host 0.0.0.0 --port $PORT --workers 1
