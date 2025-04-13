@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 # --- НАСТРОЙКА ---
 CREDENTIALS_FILE_PATH = "credentials.json"
 logging.basicConfig(
-    level=logging.INFO, # Установите DEBUG для логов Заголовки/Сырые данные
+    level=logging.INFO, # Установите DEBUG для детальных логов
     format='%(asctime)s - %(name)s - %(levelname)s - [PID:%(process)d] - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -80,7 +80,6 @@ class AnimatorStatusBot:
 
         self.setup_database()
         self.setup_google_sheets()
-        # Внутри этой функции фильтр MessageHandler используется filters.ALL (для теста)
         self.telegram_app = self.create_telegram_app()
         logger.info("Экземпляр AnimatorStatusBot создан. Инициализация Telegram App будет при первом запросе.")
 
@@ -182,7 +181,7 @@ class AnimatorStatusBot:
         # Логируем В ЛЮБОМ СЛУЧАЕ
         logger.info(f"===== handle_message ВЫЗВАН! (фильтр filters.ALL) =====")
         logger.info(f"Update ID: {update.update_id}")
-        logger.info(f"Update Type: {update.effective_update_type}")
+        # logger.info(f"Update Type: {update.effective_update_type}") # <--- ЗАКОММЕНТИРОВАНО/УДАЛЕНО
         logger.info(f"Chat ID: {effective_chat.id if effective_chat else 'N/A'}")
         logger.info(f"Chat Type: {effective_chat.type if effective_chat else 'N/A'}")
         logger.info(f"User ID: {effective_user.id if effective_user else 'N/A'}")
@@ -211,7 +210,7 @@ class AnimatorStatusBot:
             else:
                 logger.debug(f"Допустимый статус не найден в тексте сообщения.")
         else:
-            logger.info("handle_message: Обновление не является текстовым сообщением. Пропуск извлечения статуса.")
+            logger.info("handle_message: Обновление не содержит текста (update.effective_message.text is False/None). Пропуск извлечения статуса.")
 
 
     async def _ensure_initialized(self):
@@ -244,8 +243,11 @@ class AnimatorStatusBot:
                  await self.telegram_app.process_update(update)
                  logger.debug("Обновление успешно передано в telegram_app.process_update")
              except Exception as ptb_process_err:
-                  logger.error(f"Ошибка внутри telegram_app.process_update: {ptb_process_err}", exc_info=True)
-                  raise ptb_process_err
+                  # Ловим ошибки из колбэков PTB (как предыдущий AttributeError)
+                  logger.error(f"Ошибка внутри telegram_app.process_update (вероятно, из callback-функции): {ptb_process_err}", exc_info=True)
+                  # НЕ перевыбрасываем ошибку из колбэка, чтобы вебхук вернул 200 OK,
+                  # иначе Telegram будет повторять отправку обновления.
+                  # raise ptb_process_err
 
 
 # --- ГЛОБАЛЬНЫЕ ЭКЗЕМПЛЯРЫ И ASGI/WSGI ПРИЛОЖЕНИЯ ---
@@ -269,12 +271,9 @@ logger.info("ASGI обертка создана.")
 @flask_app.route('/webhook', methods=['POST'])
 async def webhook():
     """Обработчик вебхука Telegram."""
-    # --- ДОБАВЛЕН САМЫЙ РАННИЙ ЛОГ ---
     logger.info("===== ВХОД В ФУНКЦИЮ /webhook =====")
-    # --- КОНЕЦ САМОГО РАННЕГО ЛОГА ---
     worker_pid = os.getpid()
     logger.debug(f"[Worker {worker_pid}] Входящий запрос на /webhook ({request.method}) от {request.remote_addr}")
-    # Логируем заголовки на уровне DEBUG
     logger.debug(f"[Worker {worker_pid}] Заголовки запроса: {request.headers}")
 
     if bot_instance is None:
@@ -283,27 +282,23 @@ async def webhook():
     if request.method == "POST":
         update_json = None
         try:
-            # --- ДОБАВЛЕН ЛОГ ПЕРЕД ПОЛУЧЕНИЕМ JSON ---
             logger.info(f"[Worker {worker_pid}] /webhook: Попытка получить JSON из запроса...")
-            # --- КОНЕЦ ЛОГА ---
             update_json = request.get_json(force=True)
             if not update_json:
                  logger.warning(f"[Worker {worker_pid}] /webhook: Пустой JSON.")
                  return 'Bad Request: Empty JSON', 400
 
-            # --- ДОБАВЛЕН ЛОГ ПЕРЕД ВЫЗОВОМ process_update ---
             logger.info(f"[Worker {worker_pid}] /webhook: JSON получен, вызов bot_instance.process_update...")
-            # --- КОНЕЦ ЛОГА ---
             await bot_instance.process_update(update_json)
-            # --- ДОБАВЛЕН ЛОГ ПОСЛЕ УСПЕШНОГО ВЫЗОВА process_update ---
-            logger.info(f"[Worker {worker_pid}] /webhook: bot_instance.process_update ЗАВЕРШЕН (без исключений).")
-            # --- КОНЕЦ ЛОГА ---
+            logger.info(f"[Worker {worker_pid}] /webhook: bot_instance.process_update ЗАВЕРШЕН.")
+            # Возвращаем OK, даже если была ошибка внутри колбэка (она уже залогирована)
             return 'OK', 200
         except json.JSONDecodeError as json_err:
              raw_data = request.get_data(as_text=True)
              logger.error(f"[Worker {worker_pid}] /webhook: Ошибка декодирования JSON: {json_err}. Сырые данные (начало): {raw_data[:500]}")
              return 'Bad Request: Invalid JSON', 400
         except RuntimeError as rt_err:
+             # Эта ошибка ловится, если _ensure_initialized падает
              if "Failed to initialize Telegram Application" in str(rt_err) or "Application was not initialized" in str(rt_err):
                   logger.exception(f"[Worker {worker_pid}] /webhook: КРИТИЧЕСКАЯ ОШИБКА - Не удалось инициализировать приложение Telegram: {rt_err}")
                   return 'Internal Server Error - TG App Initialization Failed', 500
@@ -311,7 +306,8 @@ async def webhook():
                   logger.exception(f"[Worker {worker_pid}] /webhook: Неожиданная ошибка RuntimeError: {rt_err}")
                   return 'Internal Server Error', 500
         except Exception as e:
-            logger.exception(f"[Worker {worker_pid}] /webhook: Критическая ошибка обработки (вероятно, из process_update): {e}")
+            # Ловим другие ошибки, которые могли просочиться (маловероятно)
+            logger.exception(f"[Worker {worker_pid}] /webhook: Критическая ошибка обработки: {e}")
             return 'Internal Server Error', 500
     else:
         logger.warning(f"[Worker {worker_pid}] /webhook: Недопустимый метод {request.method}")
