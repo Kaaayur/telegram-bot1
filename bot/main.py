@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 # --- НАСТРОЙКА ---
 CREDENTIALS_FILE_PATH = "credentials.json"
 logging.basicConfig(
-    level=logging.INFO, # Установите DEBUG, если нужно еще больше деталей
+    level=logging.INFO, # Установите DEBUG для логов Заголовки/Сырые данные
     format='%(asctime)s - %(name)s - %(levelname)s - [PID:%(process)d] - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -80,7 +80,7 @@ class AnimatorStatusBot:
 
         self.setup_database()
         self.setup_google_sheets()
-        # Внутри этой функции фильтр MessageHandler изменен на filters.ALL
+        # Внутри этой функции фильтр MessageHandler используется filters.ALL (для теста)
         self.telegram_app = self.create_telegram_app()
         logger.info("Экземпляр AnimatorStatusBot создан. Инициализация Telegram App будет при первом запросе.")
 
@@ -156,10 +156,8 @@ class AnimatorStatusBot:
         application.add_handler(CommandHandler('start', self.start_command))
 
         # --- РАДИКАЛЬНЫЙ ТЕСТ: Ловим ВООБЩЕ ВСЁ ---
-        # Используем filters.ALL, чтобы увидеть, вызывается ли handle_message
-        # для ЛЮБОГО обновления из группы.
         application.add_handler(MessageHandler(
-            filters.ALL, # <--- ИСПРАВЛЕНО: Ловим все типы обновлений
+            filters.ALL, # Ловим все типы обновлений
             self.handle_message
         ))
         logger.warning("!!! ТЕСТ: MessageHandler настроен на filters.ALL (ловит ВСЁ) !!!")
@@ -179,18 +177,18 @@ class AnimatorStatusBot:
         """Обработчик ЛЮБЫХ обновлений (из-за filters.ALL)."""
         effective_user = update.effective_user
         effective_chat = update.effective_chat
-        effective_message = update.effective_message # Может быть None для других типов update
+        effective_message = update.effective_message
 
-        # Логируем В ЛЮБОМ СЛУЧАЕ, чтобы видеть, вызывается ли хендлер
+        # Логируем В ЛЮБОМ СЛУЧАЕ
         logger.info(f"===== handle_message ВЫЗВАН! (фильтр filters.ALL) =====")
         logger.info(f"Update ID: {update.update_id}")
-        logger.info(f"Update Type: {update.effective_update_type}") # Добавим тип обновления
+        logger.info(f"Update Type: {update.effective_update_type}")
         logger.info(f"Chat ID: {effective_chat.id if effective_chat else 'N/A'}")
         logger.info(f"Chat Type: {effective_chat.type if effective_chat else 'N/A'}")
         logger.info(f"User ID: {effective_user.id if effective_user else 'N/A'}")
         logger.info(f"Is Bot: {effective_user.is_bot if effective_user else 'N/A'}")
         logger.info(f"Message Thread ID: {effective_message.message_thread_id if effective_message else 'N/A'}")
-        logger.info(f"Message Text: {repr(effective_message.text) if effective_message and effective_message.text else 'N/A'}") # Проверяем наличие текста
+        logger.info(f"Message Text: {repr(effective_message.text) if effective_message and effective_message.text else 'N/A'}")
         logger.debug(f"Полный объект Update: {update.to_dict()}")
 
         # Пытаемся обработать только если это сообщение с текстом
@@ -271,21 +269,39 @@ logger.info("ASGI обертка создана.")
 @flask_app.route('/webhook', methods=['POST'])
 async def webhook():
     """Обработчик вебхука Telegram."""
+    # --- ДОБАВЛЕН САМЫЙ РАННИЙ ЛОГ ---
+    logger.info("===== ВХОД В ФУНКЦИЮ /webhook =====")
+    # --- КОНЕЦ САМОГО РАННЕГО ЛОГА ---
     worker_pid = os.getpid()
     logger.debug(f"[Worker {worker_pid}] Входящий запрос на /webhook ({request.method}) от {request.remote_addr}")
+    # Логируем заголовки на уровне DEBUG
+    logger.debug(f"[Worker {worker_pid}] Заголовки запроса: {request.headers}")
+
     if bot_instance is None:
          logger.error(f"[Worker {worker_pid}] /webhook: Экземпляр бота не был создан!")
          return 'Internal Server Error: Bot instance not available', 500
     if request.method == "POST":
+        update_json = None
         try:
+            # --- ДОБАВЛЕН ЛОГ ПЕРЕД ПОЛУЧЕНИЕМ JSON ---
+            logger.info(f"[Worker {worker_pid}] /webhook: Попытка получить JSON из запроса...")
+            # --- КОНЕЦ ЛОГА ---
             update_json = request.get_json(force=True)
             if not update_json:
                  logger.warning(f"[Worker {worker_pid}] /webhook: Пустой JSON.")
                  return 'Bad Request: Empty JSON', 400
+
+            # --- ДОБАВЛЕН ЛОГ ПЕРЕД ВЫЗОВОМ process_update ---
+            logger.info(f"[Worker {worker_pid}] /webhook: JSON получен, вызов bot_instance.process_update...")
+            # --- КОНЕЦ ЛОГА ---
             await bot_instance.process_update(update_json)
+            # --- ДОБАВЛЕН ЛОГ ПОСЛЕ УСПЕШНОГО ВЫЗОВА process_update ---
+            logger.info(f"[Worker {worker_pid}] /webhook: bot_instance.process_update ЗАВЕРШЕН (без исключений).")
+            # --- КОНЕЦ ЛОГА ---
             return 'OK', 200
         except json.JSONDecodeError as json_err:
-             logger.error(f"[Worker {worker_pid}] /webhook: Ошибка декодирования JSON: {json_err}")
+             raw_data = request.get_data(as_text=True)
+             logger.error(f"[Worker {worker_pid}] /webhook: Ошибка декодирования JSON: {json_err}. Сырые данные (начало): {raw_data[:500]}")
              return 'Bad Request: Invalid JSON', 400
         except RuntimeError as rt_err:
              if "Failed to initialize Telegram Application" in str(rt_err) or "Application was not initialized" in str(rt_err):
@@ -295,7 +311,7 @@ async def webhook():
                   logger.exception(f"[Worker {worker_pid}] /webhook: Неожиданная ошибка RuntimeError: {rt_err}")
                   return 'Internal Server Error', 500
         except Exception as e:
-            logger.exception(f"[Worker {worker_pid}] /webhook: Критическая ошибка обработки: {e}")
+            logger.exception(f"[Worker {worker_pid}] /webhook: Критическая ошибка обработки (вероятно, из process_update): {e}")
             return 'Internal Server Error', 500
     else:
         logger.warning(f"[Worker {worker_pid}] /webhook: Недопустимый метод {request.method}")
