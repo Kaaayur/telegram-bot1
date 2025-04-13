@@ -80,7 +80,7 @@ class AnimatorStatusBot:
 
         self.setup_database()
         self.setup_google_sheets()
-        # Внутри этой функции фильтр MessageHandler изменен на filters.MESSAGE
+        # Внутри этой функции фильтр MessageHandler изменен на filters.ALL
         self.telegram_app = self.create_telegram_app()
         logger.info("Экземпляр AnimatorStatusBot создан. Инициализация Telegram App будет при первом запросе.")
 
@@ -155,14 +155,14 @@ class AnimatorStatusBot:
         application = Application.builder().token(self.TOKEN).build()
         application.add_handler(CommandHandler('start', self.start_command))
 
-        # --- РАДИКАЛЬНЫЙ ТЕСТ: Ловим ВСЕ обновления типа Message ---
-        # Убираем все фильтры, кроме типа обновления, чтобы увидеть,
-        # вызывается ли handle_message ВООБЩЕ для сообщений из группы.
+        # --- РАДИКАЛЬНЫЙ ТЕСТ: Ловим ВООБЩЕ ВСЁ ---
+        # Используем filters.ALL, чтобы увидеть, вызывается ли handle_message
+        # для ЛЮБОГО обновления из группы.
         application.add_handler(MessageHandler(
-            filters.MESSAGE, # Ловим любое обновление, содержащее 'message'
+            filters.ALL, # <--- ИСПРАВЛЕНО: Ловим все типы обновлений
             self.handle_message
         ))
-        logger.warning("!!! ТЕСТ: MessageHandler настроен на filters.MESSAGE (ловит всё) !!!")
+        logger.warning("!!! ТЕСТ: MessageHandler настроен на filters.ALL (ловит ВСЁ) !!!")
         # --- КОНЕЦ РАДИКАЛЬНОГО ТЕСТА ---
 
         logger.info("Экземпляр приложения Telegram создан, обработчики добавлены.")
@@ -176,28 +176,25 @@ class AnimatorStatusBot:
         await update.message.reply_text(f"Привет! Отправь статус: '{', '.join(self.VALID_STATUSES)}'.")
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработчик ЛЮБЫХ сообщений (из-за filters.MESSAGE)."""
+        """Обработчик ЛЮБЫХ обновлений (из-за filters.ALL)."""
         effective_user = update.effective_user
         effective_chat = update.effective_chat
-        effective_message = update.effective_message
+        effective_message = update.effective_message # Может быть None для других типов update
 
         # Логируем В ЛЮБОМ СЛУЧАЕ, чтобы видеть, вызывается ли хендлер
-        logger.info(f"===== handle_message ВЫЗВАН! (фильтр filters.MESSAGE) =====")
+        logger.info(f"===== handle_message ВЫЗВАН! (фильтр filters.ALL) =====")
         logger.info(f"Update ID: {update.update_id}")
+        logger.info(f"Update Type: {update.effective_update_type}") # Добавим тип обновления
         logger.info(f"Chat ID: {effective_chat.id if effective_chat else 'N/A'}")
         logger.info(f"Chat Type: {effective_chat.type if effective_chat else 'N/A'}")
         logger.info(f"User ID: {effective_user.id if effective_user else 'N/A'}")
         logger.info(f"Is Bot: {effective_user.is_bot if effective_user else 'N/A'}")
         logger.info(f"Message Thread ID: {effective_message.message_thread_id if effective_message else 'N/A'}")
-        logger.info(f"Message Text: {repr(effective_message.text) if effective_message else 'N/A'}")
+        logger.info(f"Message Text: {repr(effective_message.text) if effective_message and effective_message.text else 'N/A'}") # Проверяем наличие текста
         logger.debug(f"Полный объект Update: {update.to_dict()}")
 
-        # Проверка на наличие текста (важно, т.к. ловим все сообщения)
-        if not effective_message or not effective_message.text:
-             logger.warning("handle_message: Сообщение не содержит текста (возможно, фото, стикер, сервисное). Пропуск извлечения статуса.")
-             # НЕ ВЫХОДИМ, чтобы увидеть лог вызова, но дальше не идем
-        else:
-            # Если текст есть, пытаемся извлечь статус
+        # Пытаемся обработать только если это сообщение с текстом
+        if effective_message and effective_message.text:
             user = effective_user
             text = effective_message.text
             username = user.username or f"{user.first_name} {user.last_name or ''}".strip() or f"ID:{user.id}"
@@ -215,6 +212,8 @@ class AnimatorStatusBot:
                      logger.error(f"Ошибка при отправке ответа пользователю: {reply_err}", exc_info=True)
             else:
                 logger.debug(f"Допустимый статус не найден в тексте сообщения.")
+        else:
+            logger.info("handle_message: Обновление не является текстовым сообщением. Пропуск извлечения статуса.")
 
 
     async def _ensure_initialized(self):
