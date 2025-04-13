@@ -5,8 +5,8 @@ import logging
 import json
 from typing import List, Dict, Optional
 from flask import Flask, request, abort
-from telegram import Update, Bot
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes # Убедимся, что filters импортирован
+from telegram import Update, Bot # Убрал ChatType, так как используем filters
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from dotenv import load_dotenv
 import sqlite3
 from datetime import datetime
@@ -80,6 +80,7 @@ class AnimatorStatusBot:
 
         self.setup_database()
         self.setup_google_sheets()
+        # Вызов create_telegram_app происходит здесь, внутри него исправлен фильтр
         self.telegram_app = self.create_telegram_app()
         logger.info("Экземпляр AnimatorStatusBot создан. Инициализация Telegram App будет при первом запросе.")
 
@@ -149,29 +150,39 @@ class AnimatorStatusBot:
         return None
 
     def create_telegram_app(self):
+        """Создает и настраивает экземпляр telegram.ext.Application."""
         if not self.TOKEN: raise ValueError("Токен бота не определен.")
         application = Application.builder().token(self.TOKEN).build()
         application.add_handler(CommandHandler('start', self.start_command))
 
-        # --- ИЗМЕНЕНИЕ: Добавляем фильтр по типу чата ---
-        # Ловим текстовые сообщения (не команды) ТОЛЬКО в группах и супергруппах
+        # --- ИСПРАВЛЕНИЕ: Используем правильные константы ChatType из filters ---
+        # Ловим текстовые сообщения (не команды) в группах или супергруппах
         application.add_handler(MessageHandler(
-            filters.TEXT & ~filters.COMMAND & (filters.ChatType.GROUPS | filters.ChatType.SUPERGROUPS),
+            filters.TEXT & ~filters.COMMAND & (filters.ChatType.GROUP | filters.ChatType.SUPERGROUP), # <--- Исправлено
             self.handle_message
         ))
-        logger.info("Экземпляр приложения Telegram создан, обработчики (включая фильтр для групп) добавлены.")
-        # --- КОНЕЦ ИЗМЕНЕНИЯ ---
+        logger.info("Экземпляр приложения Telegram создан, обработчики (включая фильтр для group/supergroup) добавлены.")
+        # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+
+        # Дополнительно: обработчик для личных сообщений (если нужен)
+        # Если вы хотите, чтобы бот реагировал и на статусы в личке, добавьте отдельный обработчик
+        # application.add_handler(MessageHandler(
+        #     filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
+        #     self.handle_message # Используем тот же обработчик
+        # ))
+        # logger.info("Добавлен обработчик для личных сообщений.")
 
         return application
 
     # --- Обработчики Telegram ---
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик команды /start."""
         user = update.effective_user
         logger.info(f"Получена команда /start от пользователя {user.id} ({user.username})")
         await update.message.reply_text(f"Привет! Отправь статус: '{', '.join(self.VALID_STATUSES)}'.")
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработчик текстовых сообщений (теперь с явным фильтром для групп)."""
+        """Обработчик текстовых сообщений (теперь с правильным фильтром для групп)."""
         effective_user = update.effective_user
         effective_chat = update.effective_chat
         effective_message = update.effective_message
@@ -183,8 +194,8 @@ class AnimatorStatusBot:
         logger.info(f"Chat Type: {effective_chat.type if effective_chat else 'N/A'}")
         logger.info(f"User ID: {effective_user.id if effective_user else 'N/A'}")
         logger.info(f"Is Bot: {effective_user.is_bot if effective_user else 'N/A'}")
-        logger.info(f"Message Thread ID: {effective_message.message_thread_id if effective_message else 'N/A'}")
-        logger.info(f"Message Text: {repr(effective_message.text) if effective_message else 'N/A'}")
+        logger.info(f"Message Thread ID: {effective_message.message_thread_id if effective_message else 'N/A'}") # ID темы, если есть
+        logger.info(f"Message Text: {repr(effective_message.text) if effective_message else 'N/A'}") # Используем repr для отображения спецсимволов
         logger.debug(f"Полный объект Update: {update.to_dict()}")
 
         # Проверка на наличие сообщения и текста
@@ -204,6 +215,7 @@ class AnimatorStatusBot:
             logger.info(f"Распознан статус: '{status}'")
             await self.save_status(user.id, user.username or f"ID:{user.id}", status)
             try:
+                 # Отвечаем в тот же чат (и тему, если она есть)
                  await effective_message.reply_text(f"✅ Статус '{status}' сохранен.")
                  logger.info("Ответ пользователю отправлен.")
             except Exception as reply_err:
@@ -229,27 +241,21 @@ class AnimatorStatusBot:
         logger.debug(f"Обработка JSON обновления: {update_json}")
         await self._ensure_initialized()
 
-        # --- ДОБАВЛЕН ЛОГ ПЕРЕД ВЫЗОВОМ PTB ---
-        update = None # Инициализируем на случай ошибки в de_json
+        update = None
         try:
             update = Update.de_json(update_json, self.telegram_app.bot)
             logger.info(f"Update успешно десериализован. update_id={update.update_id}, chat_id={update.effective_chat.id if update.effective_chat else 'N/A'}. Передача в telegram_app...")
         except Exception as de_json_err:
              logger.error(f"Ошибка десериализации Update.de_json: {de_json_err}", exc_info=True)
-             # Не продолжаем, если не смогли разобрать обновление
              return
-        # --- КОНЕЦ ЛОГА ---
 
-        # Если десериализация прошла успешно, передаем в обработчик PTB
         if update:
              try:
                  await self.telegram_app.process_update(update)
                  logger.debug("Обновление успешно передано в telegram_app.process_update")
              except Exception as ptb_process_err:
-                  # Ловим ошибки, которые могут возникнуть внутри process_update библиотеки PTB
                   logger.error(f"Ошибка внутри telegram_app.process_update: {ptb_process_err}", exc_info=True)
-                  # Возможно, стоит вернуть ошибку вебхуку
-                  # raise ptb_process_err # Или перевыбросить
+                  raise ptb_process_err # Перевыбрасываем, чтобы webhook вернул 500
 
 
 # --- ГЛОБАЛЬНЫЕ ЭКЗЕМПЛЯРЫ И ASGI/WSGI ПРИЛОЖЕНИЯ ---
@@ -284,9 +290,8 @@ async def webhook():
             if not update_json:
                  logger.warning(f"[Worker {worker_pid}] /webhook: Пустой JSON.")
                  return 'Bad Request: Empty JSON', 400
-            # Вызываем обработку, внутри которой теперь есть больше логов
             await bot_instance.process_update(update_json)
-            # logger.info(f"[Worker {worker_pid}] /webhook: Вебхук успешно обработан.") # Можно закомментировать, т.к. успешный лог должен быть внутри
+            # logger.info(f"[Worker {worker_pid}] /webhook: Вебхук успешно обработан.") # Успешный лог теперь внутри handle_message
             return 'OK', 200
         except json.JSONDecodeError as json_err:
              logger.error(f"[Worker {worker_pid}] /webhook: Ошибка декодирования JSON: {json_err}")
@@ -299,7 +304,7 @@ async def webhook():
                   logger.exception(f"[Worker {worker_pid}] /webhook: Неожиданная ошибка RuntimeError: {rt_err}")
                   return 'Internal Server Error', 500
         except Exception as e:
-            # Ловим ошибки, которые могли прийти из process_update (например, из PTB)
+            # Ловим ошибки, перевыброшенные из process_update
             logger.exception(f"[Worker {worker_pid}] /webhook: Критическая ошибка обработки: {e}")
             return 'Internal Server Error', 500
     else:
