@@ -5,7 +5,7 @@ import logging
 import json
 from typing import List, Dict, Optional
 from flask import Flask, request, abort
-from telegram import Update, Bot # Убрал ChatType, так как используем filters
+from telegram import Update, Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from dotenv import load_dotenv
 import sqlite3
@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 # --- НАСТРОЙКА ---
 CREDENTIALS_FILE_PATH = "credentials.json"
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.INFO, # Установите DEBUG, если нужно еще больше деталей
     format='%(asctime)s - %(name)s - %(levelname)s - [PID:%(process)d] - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -80,7 +80,7 @@ class AnimatorStatusBot:
 
         self.setup_database()
         self.setup_google_sheets()
-        # Вызов create_telegram_app происходит здесь, внутри него исправлен фильтр
+        # Внутри этой функции фильтр MessageHandler изменен на filters.MESSAGE
         self.telegram_app = self.create_telegram_app()
         logger.info("Экземпляр AnimatorStatusBot создан. Инициализация Telegram App будет при первом запросе.")
 
@@ -155,23 +155,17 @@ class AnimatorStatusBot:
         application = Application.builder().token(self.TOKEN).build()
         application.add_handler(CommandHandler('start', self.start_command))
 
-        # --- ИСПРАВЛЕНИЕ: Используем правильные константы ChatType из filters ---
-        # Ловим текстовые сообщения (не команды) в группах или супергруппах
+        # --- РАДИКАЛЬНЫЙ ТЕСТ: Ловим ВСЕ обновления типа Message ---
+        # Убираем все фильтры, кроме типа обновления, чтобы увидеть,
+        # вызывается ли handle_message ВООБЩЕ для сообщений из группы.
         application.add_handler(MessageHandler(
-            filters.TEXT & ~filters.COMMAND & (filters.ChatType.GROUP | filters.ChatType.SUPERGROUP), # <--- Исправлено
+            filters.MESSAGE, # Ловим любое обновление, содержащее 'message'
             self.handle_message
         ))
-        logger.info("Экземпляр приложения Telegram создан, обработчики (включая фильтр для group/supergroup) добавлены.")
-        # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+        logger.warning("!!! ТЕСТ: MessageHandler настроен на filters.MESSAGE (ловит всё) !!!")
+        # --- КОНЕЦ РАДИКАЛЬНОГО ТЕСТА ---
 
-        # Дополнительно: обработчик для личных сообщений (если нужен)
-        # Если вы хотите, чтобы бот реагировал и на статусы в личке, добавьте отдельный обработчик
-        # application.add_handler(MessageHandler(
-        #     filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
-        #     self.handle_message # Используем тот же обработчик
-        # ))
-        # logger.info("Добавлен обработчик для личных сообщений.")
-
+        logger.info("Экземпляр приложения Telegram создан, обработчики добавлены.")
         return application
 
     # --- Обработчики Telegram ---
@@ -182,46 +176,45 @@ class AnimatorStatusBot:
         await update.message.reply_text(f"Привет! Отправь статус: '{', '.join(self.VALID_STATUSES)}'.")
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработчик текстовых сообщений (теперь с правильным фильтром для групп)."""
+        """Обработчик ЛЮБЫХ сообщений (из-за filters.MESSAGE)."""
         effective_user = update.effective_user
         effective_chat = update.effective_chat
         effective_message = update.effective_message
 
         # Логируем В ЛЮБОМ СЛУЧАЕ, чтобы видеть, вызывается ли хендлер
-        logger.info(f"===== handle_message ВЫЗВАН! =====")
+        logger.info(f"===== handle_message ВЫЗВАН! (фильтр filters.MESSAGE) =====")
         logger.info(f"Update ID: {update.update_id}")
         logger.info(f"Chat ID: {effective_chat.id if effective_chat else 'N/A'}")
         logger.info(f"Chat Type: {effective_chat.type if effective_chat else 'N/A'}")
         logger.info(f"User ID: {effective_user.id if effective_user else 'N/A'}")
         logger.info(f"Is Bot: {effective_user.is_bot if effective_user else 'N/A'}")
-        logger.info(f"Message Thread ID: {effective_message.message_thread_id if effective_message else 'N/A'}") # ID темы, если есть
-        logger.info(f"Message Text: {repr(effective_message.text) if effective_message else 'N/A'}") # Используем repr для отображения спецсимволов
+        logger.info(f"Message Thread ID: {effective_message.message_thread_id if effective_message else 'N/A'}")
+        logger.info(f"Message Text: {repr(effective_message.text) if effective_message else 'N/A'}")
         logger.debug(f"Полный объект Update: {update.to_dict()}")
 
-        # Проверка на наличие сообщения и текста
+        # Проверка на наличие текста (важно, т.к. ловим все сообщения)
         if not effective_message or not effective_message.text:
-             logger.warning("handle_message: Сообщение без текста или update.effective_message is None. Пропуск обработки.")
-             return
-
-        user = effective_user
-        text = effective_message.text
-        username = user.username or f"{user.first_name} {user.last_name or ''}".strip() or f"ID:{user.id}"
-
-        # Извлекаем статус
-        status = self.extract_status(text)
-        logger.info(f"Результат extract_status для текста '{text}': {status}")
-
-        if status:
-            logger.info(f"Распознан статус: '{status}'")
-            await self.save_status(user.id, user.username or f"ID:{user.id}", status)
-            try:
-                 # Отвечаем в тот же чат (и тему, если она есть)
-                 await effective_message.reply_text(f"✅ Статус '{status}' сохранен.")
-                 logger.info("Ответ пользователю отправлен.")
-            except Exception as reply_err:
-                 logger.error(f"Ошибка при отправке ответа пользователю: {reply_err}", exc_info=True)
+             logger.warning("handle_message: Сообщение не содержит текста (возможно, фото, стикер, сервисное). Пропуск извлечения статуса.")
+             # НЕ ВЫХОДИМ, чтобы увидеть лог вызова, но дальше не идем
         else:
-            logger.debug(f"Допустимый статус не найден в сообщении.")
+            # Если текст есть, пытаемся извлечь статус
+            user = effective_user
+            text = effective_message.text
+            username = user.username or f"{user.first_name} {user.last_name or ''}".strip() or f"ID:{user.id}"
+
+            status = self.extract_status(text)
+            logger.info(f"Результат extract_status для текста '{text}': {status}")
+
+            if status:
+                logger.info(f"Распознан статус: '{status}'")
+                await self.save_status(user.id, user.username or f"ID:{user.id}", status)
+                try:
+                     await effective_message.reply_text(f"✅ Статус '{status}' сохранен.")
+                     logger.info("Ответ пользователю отправлен.")
+                except Exception as reply_err:
+                     logger.error(f"Ошибка при отправке ответа пользователю: {reply_err}", exc_info=True)
+            else:
+                logger.debug(f"Допустимый статус не найден в тексте сообщения.")
 
 
     async def _ensure_initialized(self):
@@ -255,7 +248,7 @@ class AnimatorStatusBot:
                  logger.debug("Обновление успешно передано в telegram_app.process_update")
              except Exception as ptb_process_err:
                   logger.error(f"Ошибка внутри telegram_app.process_update: {ptb_process_err}", exc_info=True)
-                  raise ptb_process_err # Перевыбрасываем, чтобы webhook вернул 500
+                  raise ptb_process_err
 
 
 # --- ГЛОБАЛЬНЫЕ ЭКЗЕМПЛЯРЫ И ASGI/WSGI ПРИЛОЖЕНИЯ ---
@@ -291,7 +284,6 @@ async def webhook():
                  logger.warning(f"[Worker {worker_pid}] /webhook: Пустой JSON.")
                  return 'Bad Request: Empty JSON', 400
             await bot_instance.process_update(update_json)
-            # logger.info(f"[Worker {worker_pid}] /webhook: Вебхук успешно обработан.") # Успешный лог теперь внутри handle_message
             return 'OK', 200
         except json.JSONDecodeError as json_err:
              logger.error(f"[Worker {worker_pid}] /webhook: Ошибка декодирования JSON: {json_err}")
@@ -304,7 +296,6 @@ async def webhook():
                   logger.exception(f"[Worker {worker_pid}] /webhook: Неожиданная ошибка RuntimeError: {rt_err}")
                   return 'Internal Server Error', 500
         except Exception as e:
-            # Ловим ошибки, перевыброшенные из process_update
             logger.exception(f"[Worker {worker_pid}] /webhook: Критическая ошибка обработки: {e}")
             return 'Internal Server Error', 500
     else:
